@@ -87,9 +87,8 @@ static void t_calcBoundBox3D( const int N,  const EVec3d* verts, EVec3f &BBmin, 
 //Mesh filling ////////////////////////////////////////////////////////////////////////////
 
 
-//T = EVec3d or EVec3f
-//template<class T>
-static void genBinaryVolumeInTriangleMesh
+// cast ray in X axis 
+static void genBinaryVolumeInTriangleMeshX
 (
 	const int W,
 	const int H,
@@ -212,6 +211,133 @@ static void genBinaryVolumeInTriangleMesh
 	}
 }
 
+
+// cast ray in Y axis ( divide ZX plane )  
+static void genBinaryVolumeInTriangleMeshY
+(
+	const int W,
+	const int H,
+	const int D,
+	const double px,
+	const double py,
+	const double pz,
+
+	const int vSize,
+	const int pSize,
+	const EVec3d *verts,
+	const EVec3d *vNorm, 
+	const TPoly  *polys,
+	const EVec3d *pNorm,
+
+	byte *binVol //allocated[WxHxD], 0:out, 1:in
+)
+{
+	const int WH = W*H, WHD = W*H*D;
+	const EVec3f cuboid( (float)(W*px), (float)(H*py), (float)(D*pz));
+
+	EVec3f BBmin, BBmax; 
+	t_calcBoundBox3D( vSize, verts, BBmin, BBmax );
+
+	memset( binVol, 0, sizeof( byte ) * WHD );
+
+
+	// insert triangles in BINs -- divide yz space into (BIN_SIZE x BIN_SIZE)	
+	const int BIN_SIZE = 20;
+	vector< vector<int> > polyID_Bins( BIN_SIZE * BIN_SIZE, vector<int>() );
+
+	for( int p=0; p<pSize; ++p)
+	{
+		const int *idx = polys[p].vIdx;
+		EVec3d v[3] = { verts[ idx[0] ], verts[ idx[1] ], verts[ idx[2] ] };
+		
+		set<int> trgtSet;
+		for( int i=0; i < 3; ++i)
+		{
+			int xi = min( (int) (v[i][0]/cuboid[0]*BIN_SIZE), BIN_SIZE-1 );
+			int zi = min( (int) (v[i][2]/cuboid[2]*BIN_SIZE), BIN_SIZE-1 );
+			trgtSet.insert(zi * BIN_SIZE + xi);
+		}
+
+		for( const auto &it : trgtSet) polyID_Bins[ it ].push_back(p);
+	}
+
+
+	// ray casting along x axis to fill inside the mesh 
+	int zI, xI;
+	double z,x;
+	for (zI = 0, z = 0.5*pz;  zI < D;  ++zI, z += pz) if( BBmin[2] <= z && z <= BBmax[2] )
+	for (xI = 0, x = 0.5*px;  xI < W;  ++xI, x += px) if( BBmin[0] <= x && x <= BBmax[0] )
+	{
+		int bin_xi = min( (int) (x/cuboid[0]*BIN_SIZE), BIN_SIZE-1 );
+		int bin_zi = min( (int) (z/cuboid[2]*BIN_SIZE), BIN_SIZE-1 );
+		vector<int> &trgtBin = polyID_Bins[ bin_zi * BIN_SIZE + bin_xi ];
+
+		multimap<double, double> blist;// (xPos, normInXdir);
+
+		for( const auto pi : trgtBin ) if( pNorm[pi][1] != 0 ) 
+		{
+			const int *idx   = polys[ pi ].vIdx;
+			const EVec3d &V0 = verts[ idx[0] ];
+			const EVec3d &V1 = verts[ idx[1] ];
+			const EVec3d &V2 = verts[ idx[2] ];
+
+			//pre-check
+			if( (x<V0[0] && x<V1[0] && x<V2[0]) || (x>V0[0] && x>V1[0] && x>V2[0]) ) continue;
+			if( (z<V0[2] && z<V1[2] && z<V2[2]) || (z>V0[2] && z>V1[2] && z>V2[2]) ) continue;
+				
+			double s,t;
+			if( !t_solve2by2LinearEquation( V1[0]-V0[0], V2[0]-V0[0], 
+				                            V1[2]-V0[2], V2[2]-V0[2], x-V0[0], 
+				                                                      z-V0[2], s, t) ) continue; 
+				
+			if (s < 0 || t < 0 || s+t > 1) continue;
+				
+			double y = (1-s-t)*V0[1] + s*V1[1] + t*V2[1];//y 座標
+			blist.insert( make_pair( y, pNorm[pi][1]) );
+		}
+
+		if( blist.size() == 0 ) continue;
+
+		//clean blist (edge上で起こった交差重複を削除)
+		while( blist.size() != 0 )
+		{
+			if( blist.size() == 1 ){ blist.clear(); break;}
+
+			bool found = false;
+			auto it0 = blist.begin();
+			auto it1 = blist.begin(); it1++;
+				
+			for(; it1 != blist.end(); ++it0, ++it1) if( it0->second * it1->second > 0)
+			{
+				blist.erase( it1 );
+				found = true;
+				break;
+			}
+			if( !found ) break;
+		}				
+		
+
+		bool flag = false;
+		int yI = 0;
+		
+		//int pivIdx = xI ;
+		for ( auto it = blist.begin(); it != blist.end(); ++it) 
+		{
+			int pivYi= (int)(it->first / py);
+			for( ; yI <= pivYi && yI < H; ++yI) binVol[ xI + yI * W + zI*WH ] = flag; 
+			flag = !flag;
+		}
+		if( flag == true)
+		{
+			fprintf( stderr, "error double check here!");
+			flag = false;
+		}
+		//残りを塗る
+		for ( ; yI<H; ++yI) binVol[ xI + yI * W + zI*WH  ] = flag;
+	}
+}
+
+
 ///////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////
@@ -242,6 +368,7 @@ void TCore::loadModels()
 
 	if( !myFileDialog("texture (*.jpg;*.bmp)|*.jpg;*.bmp", fname) ) exit(0);
 	m_texture.Allocate(fname.c_str());
+	m_texture.FlipInY();
 
 
 	//flip stac direction (only for this data )
@@ -267,12 +394,20 @@ void TCore::loadModels()
 		minV = min(minV, m_volume[i]); 
 		maxV = max(maxV, m_volume[i]);
 	}
-	for (int i = 0; i < WHD; ++i) m_volumeOgl[i] = (byte)( (m_volume[i] - minV) / (double)(maxV - minV) * 255 ) ;
 
+	for (int i = 0; i < WHD; ++i) 
+	{
+		//可視化用伝達関数
+		maxV = 2000;
+		minV = -100;
+
+		double v = (m_volume[i] - minV) / (double)(maxV - minV) * 255;
+		m_volumeOgl[i] = (byte) max( 0, min(v,255) ) ;
+	}
 	//allocate flag volume (0:モデル外, 1:モデル内:cut strokeで削除, 2:モデル内&非削除)
 	m_volumeFlg.Allocate( m_reso );
 	
-	genBinaryVolumeInTriangleMesh( 
+	genBinaryVolumeInTriangleMeshY( 
 		m_reso[0], m_reso[1], m_reso[2], m_pitch[0], m_pitch[1], m_pitch[2], 
 		m_surface.m_vSize, m_surface.m_pSize, m_surface.m_verts, m_surface.m_v_norms, m_surface.m_polys, m_surface.m_p_norms, m_volumeFlg.getVol());
 
@@ -289,7 +424,8 @@ void TCore::loadModels()
 
 TCore::TCore() : 
 	m_SurfaceShader("shader\\surfVtx.glsl"  , "shader\\surfFlg.glsl"  ), 
-	m_CrsSecShader ("shader\\crssecVtx.glsl", "shader\\crssecFlg.glsl")
+	m_CrsSecShader ("shader\\crssecVtx.glsl", "shader\\crssecFlg.glsl"),
+	m_SurfaceShader_trans("shader\\surfVtx.glsl", "shader\\surfFlg_trans.glsl")
 
 {
 	m_bL = m_bR = m_bM = false;
@@ -304,7 +440,7 @@ void TCore::BtnDownL (EVec2i p, OglForCLI* ogl)
 {
 	m_bL = true;
 
-	if( isShiftKeyOn() )
+	if( isCtrKeyOn() )
 	{
 		m_stroke2D.clear();
 		m_stroke3D.clear();
@@ -414,7 +550,7 @@ void t_drawFrame(const EVec3f &cuboid)
 	};
 
 	glDisable(GL_LIGHTING);
-	glColor3d(1, 1, 0.2);
+	glColor3d(0, 0, 0.5);
 	glLineWidth(4);
 
 	glEnableClientState(GL_VERTEX_ARRAY);
@@ -443,30 +579,44 @@ void TCore::drawScene(EVec3d camP)
 
 
 	glActiveTextureARB(GL_TEXTURE1);
-	m_volumeOgl.bindOgl(false);
+	m_volumeOgl.bindOgl(true);
 	glActiveTextureARB(GL_TEXTURE2);
 	m_volumeFlg.bindOgl(false);
 	glActiveTextureARB(GL_TEXTURE3);
-	m_texture  .bindOgl(false);
+	m_texture  .bindOgl(true);
 	
-	t_drawFrame(m_cuboid);
-
+	if( !isShiftKeyOn() ) t_drawFrame(m_cuboid);
 	
-	//draw surface
-	m_SurfaceShader.bind(1,2,3, m_reso, camP, m_cuboid.cast<double>() );
-	m_surface.draw();
-	m_SurfaceShader.unbind();
-
-	//draw crssec
+	//draw crssec 
 	glDisable(GL_CULL_FACE);
 	m_CrsSecShader.bind(1,2,3, m_reso, camP, m_cuboid.cast<double>() );
 	m_CutSurface.draw();
 	m_CrsSecShader.unbind();
 	glEnable(GL_CULL_FACE);
 
+
+	//draw surface
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	m_SurfaceShader.bind(1,2,3, m_reso, camP, m_cuboid.cast<double>() );
+	m_surface.draw();
+	m_SurfaceShader.unbind();
+
+	if( !isSpaceKeyOn() )
+	{
+		glDepthMask(false);
+		glEnable( GL_BLEND );
+		m_SurfaceShader_trans.bind(1,2,3, m_reso, camP, m_cuboid.cast<double>() );
+		m_surface.draw();
+		m_SurfaceShader_trans.unbind();
+		glDisable( GL_BLEND );
+		glDepthMask(true);
+	}
+
 	//draw Cut stroke
 	if (m_bDrawStr )
 	{
+		glColor3d(1,0,0);
+		glLineWidth(3);
 		glBegin(GL_LINE_STRIP);
 			for (const auto &p : m_stroke3D) glVertex3fv( p.data() );
 		glEnd();

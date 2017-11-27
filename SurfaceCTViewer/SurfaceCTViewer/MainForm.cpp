@@ -36,12 +36,11 @@ void MainForm::RedrawMainPanel()
 {
 	if( m_ogl == 0 ) return;
 
-	
+
+	m_ogl->SetBgColor(1,1,1,1);
 	EVec3f cuboid(10,10,10);//ImageCore::getInst()->getCuboidF();
 	float  nearDist = (cuboid[0] + cuboid[1] + cuboid[2]) / 3.0f * 0.01f;
 	float  farDist = (cuboid[0] + cuboid[1] + cuboid[2]) / 3.0f * 16;
-
-
 	m_ogl->OnDrawBegin( m_mainPanel->Width, m_mainPanel->Height, 45.0, nearDist, farDist);
 	
 	EVec3f p = m_ogl->GetCamPos();

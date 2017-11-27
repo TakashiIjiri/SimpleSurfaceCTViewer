@@ -42,7 +42,8 @@ class TCore
 
 
 	GlslShader m_SurfaceShader;
-	GlslShader m_CrsSecShader ;
+	GlslShader m_SurfaceShader_trans ;
+	GlslShader m_CrsSecShader      ;
 
 	TCore();
 public:
