@@ -2,6 +2,7 @@
 #include "TCore.h"
 #include "MainForm.h"
 
+#include "time.h"
 #include <map>
 
 
@@ -87,6 +88,68 @@ static void t_calcBoundBox3D( const int N,  const EVec3d* verts, EVec3f &BBmin, 
 //Mesh filling ////////////////////////////////////////////////////////////////////////////
 
 
+inline void calcBoundBox(
+	const EVec3f &v0, 
+	const EVec3f &v1,
+	const EVec3f &v2,
+	EVec3f &bbMin,
+	EVec3f &bbMax)
+{
+	bbMin << min3(v0[0], v1[0], v2[0]), min3(v0[1], v1[1], v2[1]), min3(v0[2], v1[2], v2[2]);
+	bbMax << max3(v0[0], v1[0], v2[0]), max3(v0[1], v1[1], v2[1]), max3(v0[2], v1[2], v2[2]);
+}
+
+
+// 
+// intersection h = v0 + s(v1-v0) + t(v2-v0) = (x,y,z)    // two of x,y,z are known , v0,v1,v2 are known 
+
+inline bool intersectTriangleToRayX(
+	const EVec3f &v0, 
+	const EVec3f &v1, 
+	const EVec3f &v2, 
+	const double y, 
+	const double z, 
+	
+	double &x //output 
+)
+{
+	//pre-check
+	if( (y<v0[1] && y<v1[1] && y<v2[1]) || (y>v0[1] && y>v1[1] && y>v2[1]) ) return false;
+	if( (z<v0[2] && z<v1[2] && z<v2[2]) || (z>v0[2] && z>v1[2] && z>v2[2]) ) return false;
+				
+	double s,t;
+	if( !t_solve2by2LinearEquation( v1[1]-v0[1], v2[1]-v0[1], 
+									v1[2]-v0[2], v2[2]-v0[2], y-v0[1], z-v0[2], s, t) ) return false; 
+	if (s < 0 || t < 0 || s+t > 1) return false;
+
+	x = (1-s-t)*v0[0] + s*v1[0] + t*v2[0];
+	return true;
+}
+inline bool intersectTriangleToRayY(
+	const EVec3f &v0, 
+	const EVec3f &v1, 
+	const EVec3f &v2, 
+	const double x, 
+	const double z, 
+	
+	double &y //output 
+)
+{
+	//pre-check
+	if( (x<v0[0] && x<v1[0] && x<v2[0]) || (x>v0[0] && x>v1[0] && x>v2[0]) ) return false;
+	if( (z<v0[2] && z<v1[2] && z<v2[2]) || (z>v0[2] && z>v1[2] && z>v2[2]) ) return false;
+				
+	double s,t;
+	if( !t_solve2by2LinearEquation( v1[0]-v0[0], v2[0]-v0[0], 
+									v1[2]-v0[2], v2[2]-v0[2], x-v0[0], z-v0[2], s, t) ) return false; 
+	if (s < 0 || t < 0 || s+t > 1) return false;
+
+	y = (1-s-t)*v0[1] + s*v1[1] + t*v2[1];
+	return true;
+}
+
+
+
 // cast ray in X axis 
 static void genBinaryVolumeInTriangleMeshX
 (
@@ -107,6 +170,7 @@ static void genBinaryVolumeInTriangleMeshX
 	byte *binVol //allocated[WxHxD], 0:out, 1:in
 )
 {
+	clock_t t0 = clock();
 	const int WH = W*H, WHD = W*H*D;
 	const EVec3f cuboid( (float)(W*px), (float)(H*py), (float)(D*pz));
 
@@ -117,60 +181,43 @@ static void genBinaryVolumeInTriangleMeshX
 
 
 	// insert triangles in BINs -- divide yz space into (BIN_SIZE x BIN_SIZE)	
-	const int BIN_SIZE = 20;
+	const int BIN_SIZE = 100;
 	vector< vector<int> > polyID_Bins( BIN_SIZE * BIN_SIZE, vector<int>() );
 
 	for( int p=0; p<pSize; ++p)
 	{
-		const int *idx = polys[p].vIdx;
-		EVec3d v[3] = { verts[ idx[0] ], verts[ idx[1] ], verts[ idx[2] ] };
-		
-		set<int> trgtSet;
-		for( int i=0; i < 3; ++i)
-		{
-			int yi = min( (int) (v[i][1]/cuboid[1]*BIN_SIZE), BIN_SIZE-1 );
-			int zi = min( (int) (v[i][2]/cuboid[2]*BIN_SIZE), BIN_SIZE-1 );
-			trgtSet.insert(zi * BIN_SIZE + yi);
-		}
-
-		for( const auto &it : trgtSet) polyID_Bins[ it ].push_back(p);
+		EVec3f bbMin, bbMax;
+		calcBoundBox( verts[ polys[p].vIdx[0] ].cast<float>(), verts[ polys[p].vIdx[1] ].cast<float>(), verts[ polys[p].vIdx[2] ].cast<float>(), bbMin, bbMax );
+		int yS = min( (int) (bbMin[1]/cuboid[1]*BIN_SIZE), BIN_SIZE-1 );
+		int zS = min( (int) (bbMin[2]/cuboid[2]*BIN_SIZE), BIN_SIZE-1 );
+		int yE = min( (int) (bbMax[1]/cuboid[1]*BIN_SIZE), BIN_SIZE-1 );
+		int zE = min( (int) (bbMax[2]/cuboid[2]*BIN_SIZE), BIN_SIZE-1 );
+		for( int z = zS; z <= zE; ++z) for( int y = yS; y <= yE; ++y) polyID_Bins[ z*BIN_SIZE + y ].push_back(p);
 	}
 
+	clock_t t1 = clock();
 
 	// ray casting along x axis to fill inside the mesh 
-	int zI, yI;
-	double z,y;
-	for (zI = 0, z = 0.5*pz;  zI < D;  ++zI, z += pz) if( BBmin[2] <= z && z <= BBmax[2] )
-	for (yI = 0, y = 0.5*py;  yI < H;  ++yI, y += py) if( BBmin[1] <= y && y <= BBmax[1] )
+#pragma omp parallel for
+	for (int zI = 0;  zI < D;  ++zI) if( BBmin[2] <= (0.5 + zI) * pz && (0.5 + zI) * pz <= BBmax[2] )
+	for (int yI = 0;  yI < W;  ++yI) if( BBmin[1] <= (0.5 + yI) * py && (0.5 + yI) * px <= BBmax[1] )
 	{
-
+		double y = (0.5 + yI) * px;
+		double z = (0.5 + zI) * pz;
 		int bin_yi = min( (int) (y/cuboid[1]*BIN_SIZE), BIN_SIZE-1 );
 		int bin_zi = min( (int) (z/cuboid[2]*BIN_SIZE), BIN_SIZE-1 );
 		vector<int> &trgtBin = polyID_Bins[ bin_zi * BIN_SIZE + bin_yi ];
 
 		multimap<double, double> blist;// (xPos, normInXdir);
 
-		for( const auto pi : trgtBin ) if( pNorm[pi][0] != 0 ) 
+		for( const auto pi : trgtBin ) if( pNorm[pi][1] != 0 ) 
 		{
-			const int *idx   = polys[ pi ].vIdx;
-			const EVec3d &V0 = verts[ idx[0] ];
-			const EVec3d &V1 = verts[ idx[1] ];
-			const EVec3d &V2 = verts[ idx[2] ];
-
-			//pre-check
-			if( (y<V0[1] && y<V1[1] && y<V2[1]) || (y>V0[1] && y>V1[1] && y>V2[1]) ) continue;
-			if( (z<V0[2] && z<V1[2] && z<V2[2]) || (z>V0[2] && z>V1[2] && z>V2[2]) ) continue;
-				
-			double s,t;
-			if( !t_solve2by2LinearEquation( V1[1]-V0[1], V2[1]-V0[1], V1[2]-V0[2], V2[2]-V0[2], y-V0[1], z-V0[2], s, t) ) continue; 
-				
-			if (s < 0 || t < 0 || s+t > 1) continue;
-				
-			double x = (1-s-t)*V0[0] + s*V1[0] + t*V2[0];//x 座標
-			blist.insert( make_pair( x, pNorm[pi][0]) );
+			const EVec3f &V0 = verts[ polys[ pi ].vIdx[0] ].cast<float>();
+			const EVec3f &V1 = verts[ polys[ pi ].vIdx[1] ].cast<float>();
+			const EVec3f &V2 = verts[ polys[ pi ].vIdx[2] ].cast<float>();
+			double x;
+			if( intersectTriangleToRayX( V0, V1, V2, y,z, x) ) blist.insert( make_pair( x, pNorm[pi][0]) ); //(x 座標, normal[0])
 		}
-
-		if( blist.size() == 0 ) continue;
 
 		//clean blist (edge上で起こった交差重複を削除)
 		while( blist.size() != 0 )
@@ -190,26 +237,25 @@ static void genBinaryVolumeInTriangleMeshX
 			if( !found ) break;
 		}				
 		
-
 		bool flag = false;
 		int xI = 0;
 		
-		int pivIdx = yI*W+ zI*WH;
+		//int pivIdx = xI ;
 		for ( auto it = blist.begin(); it != blist.end(); ++it) 
 		{
-			int pivXi= (int)(it->first/px);
-			for( ; xI <= pivXi && xI < W; ++xI) binVol[ xI + pivIdx ] = flag; 
+			int pivXi= (int)(it->first / py);
+			for( ; xI <= pivXi && xI < W; ++xI) binVol[ xI + yI * W + zI*WH ] = flag; 
 			flag = !flag;
 		}
-		if( flag == true)
-		{
-			fprintf( stderr, "error double check here!");
-			flag = false;
-		}
-		//残りを塗る
-		for ( ; xI<W; ++xI) binVol[ xI + pivIdx ] = flag;
+		if( flag == true) fprintf( stderr, "error double check here!");
 	}
+
+	clock_t t2 = clock();
+	printf("compute time : %f %f\n", (t1-t0)/ (double) CLOCKS_PER_SEC, (t2-t1)/ (double) CLOCKS_PER_SEC);
 }
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
 
 
 // cast ray in Y axis ( divide ZX plane )  
@@ -232,6 +278,7 @@ static void genBinaryVolumeInTriangleMeshY
 	byte *binVol //allocated[WxHxD], 0:out, 1:in
 )
 {
+	clock_t t0 = clock();
 	const int WH = W*H, WHD = W*H*D;
 	const EVec3f cuboid( (float)(W*px), (float)(H*py), (float)(D*pz));
 
@@ -242,32 +289,29 @@ static void genBinaryVolumeInTriangleMeshY
 
 
 	// insert triangles in BINs -- divide yz space into (BIN_SIZE x BIN_SIZE)	
-	const int BIN_SIZE = 20;
+	const int BIN_SIZE = 100;
 	vector< vector<int> > polyID_Bins( BIN_SIZE * BIN_SIZE, vector<int>() );
 
 	for( int p=0; p<pSize; ++p)
 	{
-		const int *idx = polys[p].vIdx;
-		EVec3d v[3] = { verts[ idx[0] ], verts[ idx[1] ], verts[ idx[2] ] };
-		
-		set<int> trgtSet;
-		for( int i=0; i < 3; ++i)
-		{
-			int xi = min( (int) (v[i][0]/cuboid[0]*BIN_SIZE), BIN_SIZE-1 );
-			int zi = min( (int) (v[i][2]/cuboid[2]*BIN_SIZE), BIN_SIZE-1 );
-			trgtSet.insert(zi * BIN_SIZE + xi);
-		}
-
-		for( const auto &it : trgtSet) polyID_Bins[ it ].push_back(p);
+		EVec3f bbMin, bbMax;
+		calcBoundBox( verts[ polys[p].vIdx[0] ].cast<float>(), verts[ polys[p].vIdx[1] ].cast<float>(), verts[ polys[p].vIdx[2] ].cast<float>(), bbMin, bbMax );
+		int xS = min( (int) (bbMin[0]/cuboid[0]*BIN_SIZE), BIN_SIZE-1 );
+		int zS = min( (int) (bbMin[2]/cuboid[2]*BIN_SIZE), BIN_SIZE-1 );
+		int xE = min( (int) (bbMax[0]/cuboid[0]*BIN_SIZE), BIN_SIZE-1 );
+		int zE = min( (int) (bbMax[2]/cuboid[2]*BIN_SIZE), BIN_SIZE-1 );
+		for( int z = zS; z <= zE; ++z) for( int x = xS; x <= xE; ++x) polyID_Bins[ z*BIN_SIZE + x ].push_back(p);
 	}
 
+	clock_t t1 = clock();
 
 	// ray casting along x axis to fill inside the mesh 
-	int zI, xI;
-	double z,x;
-	for (zI = 0, z = 0.5*pz;  zI < D;  ++zI, z += pz) if( BBmin[2] <= z && z <= BBmax[2] )
-	for (xI = 0, x = 0.5*px;  xI < W;  ++xI, x += px) if( BBmin[0] <= x && x <= BBmax[0] )
+#pragma omp parallel for
+	for (int zI = 0;  zI < D;  ++zI) if( BBmin[2] <= (0.5 + zI) * pz && (0.5 + zI) * pz <= BBmax[2] )
+	for (int xI = 0;  xI < W;  ++xI) if( BBmin[0] <= (0.5 + xI) * px && (0.5 + xI) * px <= BBmax[0] )
 	{
+		double x = (0.5 + xI) * px;
+		double z = (0.5 + zI) * pz;
 		int bin_xi = min( (int) (x/cuboid[0]*BIN_SIZE), BIN_SIZE-1 );
 		int bin_zi = min( (int) (z/cuboid[2]*BIN_SIZE), BIN_SIZE-1 );
 		vector<int> &trgtBin = polyID_Bins[ bin_zi * BIN_SIZE + bin_xi ];
@@ -276,24 +320,12 @@ static void genBinaryVolumeInTriangleMeshY
 
 		for( const auto pi : trgtBin ) if( pNorm[pi][1] != 0 ) 
 		{
-			const int *idx   = polys[ pi ].vIdx;
-			const EVec3d &V0 = verts[ idx[0] ];
-			const EVec3d &V1 = verts[ idx[1] ];
-			const EVec3d &V2 = verts[ idx[2] ];
-
-			//pre-check
-			if( (x<V0[0] && x<V1[0] && x<V2[0]) || (x>V0[0] && x>V1[0] && x>V2[0]) ) continue;
-			if( (z<V0[2] && z<V1[2] && z<V2[2]) || (z>V0[2] && z>V1[2] && z>V2[2]) ) continue;
-				
-			double s,t;
-			if( !t_solve2by2LinearEquation( V1[0]-V0[0], V2[0]-V0[0], 
-				                            V1[2]-V0[2], V2[2]-V0[2], x-V0[0], 
-				                                                      z-V0[2], s, t) ) continue; 
-				
-			if (s < 0 || t < 0 || s+t > 1) continue;
-				
-			double y = (1-s-t)*V0[1] + s*V1[1] + t*V2[1];//y 座標
-			blist.insert( make_pair( y, pNorm[pi][1]) );
+			const EVec3f &V0 = verts[ polys[ pi ].vIdx[0] ].cast<float>();
+			const EVec3f &V1 = verts[ polys[ pi ].vIdx[1] ].cast<float>();
+			const EVec3f &V2 = verts[ polys[ pi ].vIdx[2] ].cast<float>();
+			double y;
+			if( intersectTriangleToRayY(V0,V1,V2, x,z,y) )
+				blist.insert( make_pair( y, pNorm[pi][1]) ); //(y 座標, normal)
 		}
 
 		if( blist.size() == 0 ) continue;
@@ -315,7 +347,6 @@ static void genBinaryVolumeInTriangleMeshY
 			}
 			if( !found ) break;
 		}				
-		
 
 		bool flag = false;
 		int yI = 0;
@@ -327,14 +358,11 @@ static void genBinaryVolumeInTriangleMeshY
 			for( ; yI <= pivYi && yI < H; ++yI) binVol[ xI + yI * W + zI*WH ] = flag; 
 			flag = !flag;
 		}
-		if( flag == true)
-		{
-			fprintf( stderr, "error double check here!");
-			flag = false;
-		}
-		//残りを塗る
-		for ( ; yI<H; ++yI) binVol[ xI + yI * W + zI*WH  ] = flag;
+		if( flag == true) fprintf( stderr, "error double check here!");
 	}
+
+	clock_t t2 = clock();
+	printf("compute time : %f %f\n", (t1-t0)/ (double) CLOCKS_PER_SEC, (t2-t1)/ (double) CLOCKS_PER_SEC);
 }
 
 
@@ -407,7 +435,7 @@ void TCore::loadModels()
 	//allocate flag volume (0:モデル外, 1:モデル内:cut strokeで削除, 2:モデル内&非削除)
 	m_volumeFlg.Allocate( m_reso );
 	
-	genBinaryVolumeInTriangleMeshY( 
+	genBinaryVolumeInTriangleMeshX( 
 		m_reso[0], m_reso[1], m_reso[2], m_pitch[0], m_pitch[1], m_pitch[2], 
 		m_surface.m_vSize, m_surface.m_pSize, m_surface.m_verts, m_surface.m_v_norms, m_surface.m_polys, m_surface.m_p_norms, m_volumeFlg.getVol());
 
