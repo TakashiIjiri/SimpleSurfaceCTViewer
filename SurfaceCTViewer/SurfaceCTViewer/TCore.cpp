@@ -388,7 +388,7 @@ void TCore::loadModels()
 	//load volume / surfacemodel / texture
 	std::string fname;
 
-	if( !myFileDialog("3d traw files(*.traw3D_ss;*)|*.traw3D_ss;*", fname) ) exit(0);
+	if( !myFileDialog("3d traw files(*.traw3D_ss)|*.traw3D_ss", fname) ) exit(0);
 	t_open_traw3d( fname, m_reso, m_pitch, m_cuboid, m_volume);
 
 	if( !myFileDialog("3d surface model (*.obj)|*.obj", fname) ) exit(0);
