@@ -76,6 +76,7 @@ static void t_calcBoundBox3D( const int N,  const EVec3d* verts, EVec3f &BBmin, 
 		BBmin[0] = min(BBmin[0], (float)verts[i][0]);
 		BBmin[1] = min(BBmin[1], (float)verts[i][1]);
 		BBmin[2] = min(BBmin[2], (float)verts[i][2]);
+
 		BBmax[0] = max(BBmax[0], (float)verts[i][0]);
 		BBmax[1] = max(BBmax[1], (float)verts[i][1]);
 		BBmax[2] = max(BBmax[2], (float)verts[i][2]);
@@ -95,8 +96,12 @@ inline void calcBoundBox(
 	EVec3f &bbMin,
 	EVec3f &bbMax)
 {
-	bbMin << min3(v0[0], v1[0], v2[0]), min3(v0[1], v1[1], v2[1]), min3(v0[2], v1[2], v2[2]);
-	bbMax << max3(v0[0], v1[0], v2[0]), max3(v0[1], v1[1], v2[1]), max3(v0[2], v1[2], v2[2]);
+	bbMin << min3(v0[0], v1[0], v2[0]), 
+		     min3(v0[1], v1[1], v2[1]), 
+		     min3(v0[2], v1[2], v2[2]);
+	bbMax << max3(v0[0], v1[0], v2[0]), 
+		     max3(v0[1], v1[1], v2[1]),
+		     max3(v0[2], v1[2], v2[2]);
 }
 
 
@@ -181,7 +186,7 @@ static void genBinaryVolumeInTriangleMeshX
 
 
 	// insert triangles in BINs -- divide yz space into (BIN_SIZE x BIN_SIZE)	
-	const int BIN_SIZE = 100;
+	const int BIN_SIZE = 20;
 	vector< vector<int> > polyID_Bins( BIN_SIZE * BIN_SIZE, vector<int>() );
 
 	for( int p=0; p<pSize; ++p)
@@ -200,10 +205,10 @@ static void genBinaryVolumeInTriangleMeshX
 	// ray casting along x axis to fill inside the mesh 
 #pragma omp parallel for
 	for (int zI = 0;  zI < D;  ++zI) if( BBmin[2] <= (0.5 + zI) * pz && (0.5 + zI) * pz <= BBmax[2] )
-	for (int yI = 0;  yI < W;  ++yI) if( BBmin[1] <= (0.5 + yI) * py && (0.5 + yI) * px <= BBmax[1] )
+	for (int yI = 0;  yI < H;  ++yI) if( BBmin[1] <= (0.5 + yI) * py && (0.5 + yI) * py <= BBmax[1] )
 	{
-		double y = (0.5 + yI) * px;
 		double z = (0.5 + zI) * pz;
+		double y = (0.5 + yI) * py;
 		int bin_yi = min( (int) (y/cuboid[1]*BIN_SIZE), BIN_SIZE-1 );
 		int bin_zi = min( (int) (z/cuboid[2]*BIN_SIZE), BIN_SIZE-1 );
 		vector<int> &trgtBin = polyID_Bins[ bin_zi * BIN_SIZE + bin_yi ];
@@ -289,7 +294,7 @@ static void genBinaryVolumeInTriangleMeshY
 
 
 	// insert triangles in BINs -- divide yz space into (BIN_SIZE x BIN_SIZE)	
-	const int BIN_SIZE = 100;
+	const int BIN_SIZE = 20;
 	vector< vector<int> > polyID_Bins( BIN_SIZE * BIN_SIZE, vector<int>() );
 
 	for( int p=0; p<pSize; ++p)
@@ -435,8 +440,9 @@ void TCore::loadModels()
 	//allocate flag volume (0:モデル外, 1:モデル内:cut strokeで削除, 2:モデル内&非削除)
 	m_volumeFlg.Allocate( m_reso );
 	
-	genBinaryVolumeInTriangleMeshX( 
-		m_reso[0], m_reso[1], m_reso[2], m_pitch[0], m_pitch[1], m_pitch[2], 
+	genBinaryVolumeInTriangleMeshY( 
+		m_reso[0], m_reso[1], m_reso[2], 
+		m_pitch[0], m_pitch[1], m_pitch[2], 
 		m_surface.m_vSize, m_surface.m_pSize, m_surface.m_verts, m_surface.m_v_norms, m_surface.m_polys, m_surface.m_p_norms, m_volumeFlg.getVol());
 
 
